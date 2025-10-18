@@ -72,6 +72,7 @@ pub struct EnvFs {
     inode_counter: Arc<RwLock<InodeCounter>>,
     fallback_paths: Arc<Vec<PathBuf>>,
     mountpoints: Vec<PathBuf>,
+    ignore_prefix: Arc<Vec<OsString>>,
 }
 
 fn open_mntent(path: &str) -> Result<*mut FILE> {
@@ -121,7 +122,7 @@ fn is_envfs_mountpoint(path: &Path) -> Result<bool> {
 }
 
 impl EnvFs {
-    pub fn new(fallback_paths: &[PathBuf]) -> Result<EnvFs> {
+    pub fn new(fallback_paths: &[PathBuf], ignore_prefix: &[OsString]) -> Result<EnvFs> {
         let limit = Rlimit {
             rlim_cur: 1_048_576,
             rlim_max: 1_048_576,
@@ -139,6 +140,7 @@ impl EnvFs {
             })),
             fallback_paths: Arc::new(fallback_paths.to_vec()),
             mountpoints: vec![],
+            ignore_prefix: Arc::new(ignore_prefix.to_vec()),
         })
     }
 
@@ -172,6 +174,7 @@ impl EnvFs {
             inode_counter: Arc::clone(&self.inode_counter),
             fallback_paths: Arc::clone(&self.fallback_paths),
             mountpoints: mountpoints.to_vec(),
+            ignore_prefix: Arc::clone(&self.ignore_prefix),
         };
 
         let session = try_with!(
@@ -288,12 +291,15 @@ fn which<P1, P2>(
     exe_name: P1,
     fallback_paths: &[PathBuf],
     mountpoints: &[P2],
+    ignore_prefix: &[OsString],
 ) -> Option<PathBuf>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>,
 {
-    let exe = env::split_paths(&path_env).find_map(|dir| _which(&dir, &exe_name, mountpoints));
+    let exe = env::split_paths(&path_env)
+        .filter(|dir| ignore_prefix.iter().all(|prefix| !dir.starts_with(prefix)))
+        .find_map(|dir| _which(&dir, &exe_name, mountpoints));
 
     exe.or_else(|| {
         fallback_paths
@@ -381,6 +387,7 @@ fn resolve_target<P1, P2>(
     name: P1,
     fallback_paths: &[PathBuf],
     mountpoints: &[P2],
+    ignore_prefix: &[OsString],
 ) -> Option<PathBuf>
 where
     P1: AsRef<Path>,
@@ -421,7 +428,7 @@ where
         };
         match get_path_from_mem(pid, envp) {
             Ok(path) => {
-                if let Some(exe) = which(&path, &name, &[], mountpoints) {
+                if let Some(exe) = which(&path, &name, &[], mountpoints, ignore_prefix) {
                     return Some(exe);
                 }
             }
@@ -451,7 +458,7 @@ where
 
     // We return all paths in fallback path to be resolved always independently
     // of the syscall.
-    which(path, &name, fallback_paths, mountpoints)
+    which(path, &name, fallback_paths, mountpoints, ignore_prefix)
 }
 
 fn get_syscall_args(pid: Pid) -> Result<Vec<usize>> {
@@ -537,7 +544,13 @@ impl Filesystem for EnvFs {
 
         let pid = Pid::from_raw(req.pid() as i32);
 
-        match resolve_target(pid, name, self.fallback_paths.as_slice(), &self.mountpoints) {
+        match resolve_target(
+            pid,
+            name,
+            self.fallback_paths.as_slice(),
+            &self.mountpoints,
+            &self.ignore_prefix,
+        ) {
             Some(path) => {
                 let (next_number, generation) = self.next_inode_number();
 
@@ -637,7 +650,13 @@ impl Filesystem for EnvFs {
         let pid = Pid::from_raw(req.pid() as i32);
         if inode.pid != pid {
             // unlikely
-            match resolve_target(pid, &inode.name, &self.fallback_paths, &self.mountpoints) {
+            match resolve_target(
+                pid,
+                &inode.name,
+                &self.fallback_paths,
+                &self.mountpoints,
+                &self.ignore_prefix,
+            ) {
                 Some(target) => {
                     reply.data(target.as_os_str().as_bytes());
                     return;

@@ -4,6 +4,7 @@ use nix::sys::signal;
 use nix::{mount, unistd};
 use simple_error::bail;
 use simple_error::try_with;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex};
 
@@ -35,6 +36,7 @@ struct Options {
     foreground: bool,
     remount: bool,
     fallback_paths: Vec<PathBuf>,
+    ignore_prefix: Vec<OsString>,
     args: Vec<String>,
 }
 
@@ -78,7 +80,7 @@ fn serve_fs(opts: &Options) -> Result<()> {
     }
 
     let fs = try_with!(
-        EnvFs::new(opts.fallback_paths.as_slice()),
+        EnvFs::new(opts.fallback_paths.as_slice(), &opts.ignore_prefix),
         "cannot create filesystem"
     );
 
@@ -107,6 +109,8 @@ fn show_help(prog_name: &str) {
     eprintln!("                       (can be passed multiple times)");
     eprintln!("-o bind-mount=PATH     Bind mount PATH with envfs");
     eprintln!("                       (can be passed multiple times)");
+    eprintln!("-o ignore-prefix=PATH  Ignore path entries with PREFIX");
+    eprintln!("                       (can be passed multiple times)");
 }
 
 fn parse_mount_options(mount_options: &str, opts: &mut Options) -> Result<()> {
@@ -133,6 +137,12 @@ fn parse_mount_options(mount_options: &str, opts: &mut Options) -> Result<()> {
                 }
                 opts.fallback_paths.push(PathBuf::from(mount_opt[1]));
             }
+            "ignore-prefix" => {
+                if mount_opt.len() != 2 {
+                    bail!("ignore-prefix needs an argument");
+                }
+                opts.ignore_prefix.push(OsString::from(mount_opt[1]));
+            }
             _ => {
                 eprintln!("ignore invalid mount option: {}", mount_opt[0]);
             }
@@ -150,6 +160,7 @@ fn parse_options(args: &[String]) -> Result<Options> {
         foreground: false,
         remount: false,
         fallback_paths: vec![],
+        ignore_prefix: vec![],
         args: vec![],
     };
     loop {
